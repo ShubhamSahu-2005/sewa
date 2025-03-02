@@ -1,72 +1,103 @@
 import Razorpay from "razorpay";
 import crypto from "crypto";
+import mongoose from "mongoose";
 import { connectToDB } from "@/utils/database";
 import Donation from "@/models/donations";
-import VerifiedCamp from "@/models/verifiedFundCamp";
+import verifiedCamp from "@/models/verifiedFundCamp";
 
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 
 export async function POST(req) {
   try {
+    console.log("🚀 Verifying Payment...");
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = await req.json();
 
+    // ✅ Connect to Database
     await connectToDB();
 
-    // Verify the Razorpay signature
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    // ✅ Verify Razorpay Signature
     const expectedSignature = crypto
       .createHmac("sha256", RAZORPAY_KEY_SECRET)
-      .update(body)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
 
     if (expectedSignature !== razorpay_signature) {
-      return new Response(JSON.stringify({ success: false, message: "Payment verification failed" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
+      console.error("❌ Signature verification failed");
+      return new Response(JSON.stringify({ success: false, message: "Payment verification failed" }), { status: 400 });
     }
+    
 
-    // Find the donation record
+
+    // ✅ Fetch Donation
     const donation = await Donation.findOne({ donationID: razorpay_order_id });
     if (!donation) {
-      return new Response(JSON.stringify({ success: false, message: "Donation record not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+      console.error("❌ Donation record not found");
+      return new Response(JSON.stringify({ success: false, message: "Donation record not found" }), { status: 404 });
     }
 
-    // Update the donation record in the database
+    // ✅ Update Donation Status
     donation.paymentStatus = "success";
     donation.razorpay_payment_id = razorpay_payment_id;
     donation.donationTimestamp = new Date();
-    const updatedDonation = await donation.save();
-    console.log("Updated Donation:", updatedDonation);
+    await donation.save();
+    const fundraiser = await mongoose.connection.db
+  .collection('verifiedCamp')
+  .findOne({ fundraiserID: donation.fundraiserID });
 
-    // Update the fundraiser's raisedAmount
-    await VerifiedCamp.findOneAndUpdate(
-      { fundraiserID: donation.fundraiserID },
-      { $inc: { raisedAmount: donation.amount } }
-    );
+console.log("🔍 Found fundraiser (raw query):", fundraiser);
+console.log("🔍 Type of fundraiserID:", typeof donation.fundraiserID, donation.fundraiserID);
 
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Payment verified and recorded successfully",
-        donation,
-      }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
+const fundraiserID = String(donation.fundraiserID).trim();
+
+console.log("🔍 Found fundraiser:", fundraiser);
+
+// ✅ Update Fundraiser Raised Amount
+if (!fundraiser) {
+  console.error("⚠️ Fundraiser not found for ID:", donation.fundraiserID);
+  return new Response(
+    JSON.stringify({
+      success: true,
+      message: "Payment verified but fundraiser not found",
+      donation: donation.toObject(),
+    }),
+    { status: 200 }
+  );
+}
+
+// 🔄 Update raisedAmount in the database
+const updatedFundraiser = await mongoose.connection.db
+  .collection('verifiedCamp')
+  .updateOne(
+    { fundraiserID: fundraiserID }, 
+    { $inc: { raisedAmount: donation.amount } } // Increment raisedAmount
+  );
+
+console.log("✅ Fundraiser updated successfully:", updatedFundraiser);
+
+return new Response(
+  JSON.stringify({
+    success: true,
+    message: "Payment verified and fundraiser updated",
+    updatedFundraiser,
+  }),
+  { status: 200 }
+);
+
+
+    console.log(`✅ Fundraiser updated: ${fundraiser.title} | Raised: ₹${fundraiser.raisedAmount}`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      message: "Payment verified and fundraiser updated successfully",
+      donation: donation.toObject(),
+      fundraiser: { id: fundraiser._id.toString(), raisedAmount: fundraiser.raisedAmount }
+    }), { status: 200 });
+
   } catch (error) {
-    console.error("Error verifying payment:", error);
-    return new Response(
-      JSON.stringify({ success: false, message: "Internal server error", error: error.message }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
+    console.error("❌ Error in verification process:", error);
+    return new Response(JSON.stringify({ success: false, message: "Internal server error", error: error.message }), { status: 500 });
   }
 }
+
+
+
